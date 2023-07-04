@@ -1,0 +1,97 @@
+trigger:
+  branches:
+    include:
+      - oracle
+
+pool:
+  vmImage: 'ubuntu-22.04'
+  name: Azure Pipelines
+
+variables:
+  imageName: 'spring-app'
+  imageRepository: 'axnankmjg0ek/springapp'
+  containerInstanceID: '$(OCID)'
+
+stages:
+  - stage: Build
+    displayName: Build and push Docker image
+    jobs:
+      - job: Build
+        displayName: Build Docker image
+        steps:
+          - script: |
+              imageTag=$(date +%d%m%Y)
+              echo "##vso[task.setvariable variable=imageTag]$imageTag"
+            displayName: 'Set Image Tag'
+
+          - task: Docker@2
+            displayName: Build Docker Image
+            inputs:
+              command: build
+              Dockerfile: '$(Build.SourcesDirectory)/Dockerfile'
+              containerRegistry: 'oracle_cont-registry'
+              repository: '$(imageRepository)'
+              tags: '$(imageTag)'
+
+          - task: Docker@2
+            displayName: Push Docker Image
+            inputs:
+              containerRegistry: 'oracle_cont-registry'
+              repository: '$(imageRepository)'
+              command: push
+              tags: '$(imageTag)'
+
+  - stage: Deploy
+    displayName: Deploy to Oracle Container Instance
+    dependsOn: Build
+    jobs:
+      - job: ConfigureOCI
+        displayName: Configure OCI CLI
+        pool:
+          vmImage: 'ubuntu-latest'
+        steps:
+          - script: |
+              sudo apt update
+              sudo apt install -y build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev libssl-dev libreadline-dev libffi-dev libsqlite3-dev wget libbz2-dev
+              sudo apt install -y python3-pip
+              pip3 install oci-cli
+
+            displayName: Version check and OCI CLI installation
+      
+          - checkout: self
+            persistCredentials: true
+            clean: true
+      
+          - script: |
+              mkdir -p $(HOME)/.oci
+              echo "[DEFAULT]" > $(HOME)/.oci/config
+              echo "user=ocid1.user.oc1..aaaaaaaa7la22rfm5zjxl75ch4g4l547tpuynzbxo4yzyiijvrktpofv5g7q" >> $(HOME)/.oci/config
+              echo "fingerprint=0b:af:a6:f7:39:d9:63:68:92:e2:92:e3:aa:ba:4b:3c" >> $(HOME)/.oci/config
+              echo "tenancy=ocid1.tenancy.oc1..aaaaaaaape5e2q67kyb6oqdajg3eaoww6kvaz6wf4eb4xmvvdr2jcxoa6eya" >> $(HOME)/.oci/config
+              echo "region=ap-hyderabad-1" >> $(HOME)/.oci/config
+              echo "key_file=$(Build.SourcesDirectory)/key.pem" >> $(HOME)/.oci/config
+              echo "The path to the OCI configuration file is: $(HOME)/.oci/config"
+          
+            displayName: OCI Configuration and Path Display
+
+          - script: |
+              oci os ns get
+            displayName: List OCI Compartments
+
+          - script: |
+              oci iam compartment list --all
+
+              #image_id=$(oci container image list --compartment-id $(compartment-id) --repository-name $(imageRepository) --query "data[0].id" --raw-output)
+            displayName: Test OCI CLI Configuration
+
+          - script: |
+              # Retrieve the JSON file from the Azure repo
+              curl -o config.json -L $(Build.Repository.Uri)/raw/config.json 
+              curl -o containers.json -L $(Build.Repository.Uri)/raw/containers.json
+              curl -o shape.json -L $(Build.Repository.Uri)/raw/shape.json
+              curl -o vnics.json -L $(Build.Repository.Uri)/raw/vnics.json
+    
+               #oci container-instances container-instance create --from-json file://create-instance.json
+               oci container-instances container-instance create --availability-domain ap-hyderabad-1 --compartment-id $(compartment-id) --containers file://containers.json --shape CI.Standard.E4.Flex --shape-config '{"memoryInGBs": 4.0, "ocpus": 2.0}' --vnics file://vnics.json --image-pull-secrets file://config.json
+            displayName: 'Create OCI Container Instance'
+
